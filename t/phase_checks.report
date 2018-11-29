@@ -1,0 +1,2879 @@
+==============================================================================
+./kong/pdk/client.lua
+==============================================================================
+      --- Client information module
+      -- A set of functions to retrieve information about the client connecting to
+      -- Kong in the context of a given request.
+      --
+      -- See also:
+      -- [nginx.org/en/docs/http/ngx_http_realip_module.html](http://nginx.org/en/docs/http/ngx_http_realip_module.html)
+      -- @module kong.client
+
+
+   19 local phase_checker = require "kong.pdk.private.phases"
+
+
+   19 local ngx = ngx
+   19 local tonumber = tonumber
+   19 local check_phase = phase_checker.check
+   19 local check_not_phase = phase_checker.check_not
+
+
+   19 local PHASES = phase_checker.phases
+   38 local AUTH_AND_LATER = phase_checker.new(PHASES.access,
+   19                                          PHASES.header_filter,
+   19                                          PHASES.body_filter,
+   19                                          PHASES.log)
+   19 local TABLE_OR_NIL = { ["table"] = true, ["nil"] = true }
+
+
+      local function new(self)
+   73   local _CLIENT = {}
+
+
+        ---
+        -- Returns the remote address of the client making the request. This will
+        -- **always** return the address of the client directly connecting to Kong.
+        -- That is, in cases when a load balancer is in front of Kong, this function
+        -- will return the load balancer's address, and **not** that of the
+        -- downstream client.
+        --
+        -- @function kong.client.get_ip
+        -- @phases certificate, rewrite, access, header_filter, body_filter, log
+        -- @treturn string ip The remote address of the client making the request
+        -- @usage
+        -- -- Given a client with IP 127.0.0.1 making connection through
+        -- -- a load balancer with IP 10.0.0.1 to Kong answering the request for
+        -- -- https://example.com:1234/v1/movies
+        -- kong.client.get_ip() -- "10.0.0.1"
+   73   function _CLIENT.get_ip()
+   53     check_not_phase(PHASES.init_worker)
+
+  100     return ngx.var.realip_remote_addr or ngx.var.remote_addr
+        end
+
+
+        ---
+        -- Returns the remote address of the client making the request. Unlike
+        -- `kong.client.get_ip`, this function will consider forwarded addresses in
+        -- cases when a load balancer is in front of Kong. Whether this function
+        -- returns a forwarded address or not depends on several Kong configuration
+        -- parameters:
+        --
+        -- * [trusted\_ips](https://getkong.org/docs/latest/configuration/#trusted_ips)
+        -- * [real\_ip\_header](https://getkong.org/docs/latest/configuration/#real_ip_header)
+        -- * [real\_ip\_recursive](https://getkong.org/docs/latest/configuration/#real_ip_recursive)
+        --
+        -- @function kong.client.get_forwarded_ip
+        -- @phases certificate, rewrite, access, header_filter, body_filter, log
+        -- @treturn string ip The remote address of the client making the request,
+        -- considering forwarded addresses
+        --
+        -- @usage
+        -- -- Given a client with IP 127.0.0.1 making connection through
+        -- -- a load balancer with IP 10.0.0.1 to Kong answering the request for
+        -- -- https://username:password@example.com:1234/v1/movies
+        --
+        -- kong.request.get_forwarded_ip() -- "127.0.0.1"
+        --
+        -- -- Note: assuming that 10.0.0.1 is one of the trusted IPs, and that
+        -- -- the load balancer adds the right headers matching with the configuration
+        -- -- of `real_ip_header`, e.g. `proxy_protocol`.
+   73   function _CLIENT.get_forwarded_ip()
+   14     check_not_phase(PHASES.init_worker)
+
+   25     return ngx.var.remote_addr
+        end
+
+
+        ---
+        -- Returns the remote port of the client making the request. This will
+        -- **always** return the port of the client directly connecting to Kong. That
+        -- is, in cases when a load balancer is in front of Kong, this function will
+        -- return load balancer's port, and **not** that of the downstream client.
+        -- @function kong.client.get_port
+        -- @phases certificate, rewrite, access, header_filter, body_filter, log
+        -- @treturn number The remote client port
+        -- @usage
+        -- -- [client]:40000 <-> 80:[balancer]:30000 <-> 80:[kong]:20000 <-> 80:[service]
+        -- kong.client.get_port() -- 30000
+   73   function _CLIENT.get_port()
+   14     check_not_phase(PHASES.init_worker)
+
+   25     return tonumber(ngx.var.realip_remote_port or ngx.var.remote_port)
+        end
+
+
+        ---
+        -- Returns the remote port of the client making the request. Unlike
+        -- `kong.client.get_port`, this function will consider forwarded ports in cases
+        -- when a load balancer is in front of Kong. Whether this function returns a
+        -- forwarded port or not depends on several Kong configuration parameters:
+        --
+        -- * [trusted\_ips](https://getkong.org/docs/latest/configuration/#trusted_ips)
+        -- * [real\_ip\_header](https://getkong.org/docs/latest/configuration/#real_ip_header)
+        -- * [real\_ip\_recursive](https://getkong.org/docs/latest/configuration/#real_ip_recursive)
+        -- @function kong.client.get_forwarded_port
+        -- @phases certificate, rewrite, access, header_filter, body_filter, log
+        -- @treturn number The remote client port, considering forwarded ports
+        -- @usage
+        -- -- [client]:40000 <-> 80:[balancer]:30000 <-> 80:[kong]:20000 <-> 80:[service]
+        -- kong.client.get_forwarded_port() -- 40000
+        --
+        -- -- Note: assuming that [balancer] is one of the trusted IPs, and that
+        -- -- the load balancer adds the right headers matching with the configuration
+        -- -- of `real_ip_header`, e.g. `proxy_protocol`.
+   73   function _CLIENT.get_forwarded_port()
+   14     check_not_phase(PHASES.init_worker)
+
+   25     return tonumber(ngx.var.remote_port)
+        end
+
+
+        ---
+        -- Returns the credentials of the currently authenticated consumer.
+        -- If not set yet, it returns `nil`.
+        -- @function kong.client.get_credential
+        -- @phases access, header_filter, body_filter, log
+        -- @return the authenticated credential
+        -- @usage
+        -- local credential = kong.client.get_credential()
+        -- if credential then
+        --   consumer_id = credential.consumer_id
+        -- else
+        --   -- request not authenticated yet
+        -- end
+   73   function _CLIENT.get_credential()
+   14     check_phase(AUTH_AND_LATER)
+
+   22     return ngx.ctx.authenticated_credential
+        end
+
+
+        ---
+        -- Returns the `consumer` entity of the currently authenticated consumer.
+        -- If not set yet, it returns `nil`.
+        -- @function kong.client.get_consumer
+        -- @phases access, header_filter, body_filter, log
+        -- @treturn table the authenticated consumer entity
+        -- @usage
+        -- local consumer = kong.client.get_consumer()
+        -- if consumer then
+        --   consumer_id = consumer.id
+        -- else
+        --   -- request not authenticated yet, or a credential
+        --   -- without a consumer (external auth)
+        -- end
+   73   function _CLIENT.get_consumer()
+   14     check_phase(AUTH_AND_LATER)
+
+   22     return ngx.ctx.authenticated_consumer
+        end
+
+
+        ---
+        -- Sets the authenticated consumer and/or credential for the current request.
+        -- While both `consumer` and `credential` can be `nil`, it is required
+        -- that at least one of them exists. Otherwise this function will throw an
+        -- error.
+        -- @function kong.client.authenticate
+        -- @phases access
+        -- @tparam table|nil consumer The consumer to set. Note: if no
+        -- value is provided, then any existing value will be cleared!
+        -- @tparam table|nil credential The credential to set. Note: if
+        -- no value is provided, then any existing value will be cleared!
+        -- @usage
+        -- -- assuming `credential` and `consumer` have been set by some authentication code
+        -- kong.client.authenticate(consumer, credentials)
+   73   function _CLIENT.authenticate(consumer, credential)
+   14     check_phase(PHASES.access)
+
+    8     if not TABLE_OR_NIL[type(consumer)] then
+****0       error("consumer must be a table or nil", 2)
+    8     elseif not TABLE_OR_NIL[type(credential)] then
+****0       error("credential must be a table or nil", 2)
+    8     elseif credential == nil and consumer == nil then
+****0       error("either credential or consumer must be provided", 2)
+          end
+
+    8     local ctx = ngx.ctx
+    8     ctx.authenticated_consumer = consumer
+    8     ctx.authenticated_credential = credential
+        end
+
+
+   73   return _CLIENT
+      end
+
+
+   19 return {
+   19   new = new,
+   19 }
+
+==============================================================================
+./kong/pdk/ctx.lua
+==============================================================================
+      --- Current request context data
+      --
+      -- @module kong.ctx
+
+
+   19 local ngx = ngx
+
+
+      -- shared between all global instances
+   19 local _CTX_SHARED_KEY = {}
+   19 local _CTX_CORE_KEY = {}
+
+
+      ---
+      -- A table that has the lifetime of the current request and is shared between
+      -- all plugins. It can be used to share data between several plugins in a given
+      -- request.
+      --
+      -- Since only relevant in the context of a request, this table cannot be
+      -- accessed from the top-level chunk of Lua modules. Instead, it can only be
+      -- accessed in request phases, which are represented by the `rewrite`,
+      -- `access`, `header_filter`, `body_filter`, and `log` phases of the plugin
+      -- interfaces.  Accessing this table in those functions (and their callees) is
+      -- fine.
+      --
+      -- Values inserted in this table by a plugin will be visible by all other
+      -- plugins.  One must use caution when interacting with its values, as a naming
+      -- conflict could result in the overwrite of data.
+      --
+      -- @table kong.ctx.shared
+      -- @phases rewrite, access, header_filter, body_filter, log
+      -- @usage
+      -- -- Two plugins A and B, and if plugin A has a higher priority than B's
+      -- -- (it executes before B):
+      --
+      -- -- plugin A handler.lua
+      -- function plugin_a_handler:access(conf)
+      --   kong.ctx.shared.foo = "hello world"
+      --
+      --   kong.ctx.shared.tab = {
+      --     bar = "baz"
+      --   }
+      -- end
+      --
+      -- -- plugin B handler.lua
+      -- function plugin_b_handler:access(conf)
+      --   kong.log(kong.ctx.shared.foo) -- "hello world"
+      --   kong.log(kong.ctx.shared.tab.bar) -- "baz"
+      -- end
+
+
+      ---
+      -- A table that has the lifetime of the current request - Unlike
+      -- `kong.ctx.shared`, this table is **not** shared between plugins.  Instead,
+      -- it is only visible for the current plugin _instance_. That is, if several
+      -- instances of the rate-limiting plugin are configured (e.g. on different
+      -- Services), each instance has its own table, for every request.
+      --
+      -- Because of its namespaced nature, this table is safer for a plugin to use
+      -- than `kong.ctx.shared` since it avoids potential naming conflicts, which
+      -- could lead to several plugins unknowingly overwrite each other's data.
+      --
+      -- Since only relevant in the context of a request, this table cannot be
+      -- accessed from the top-level chunk of Lua modules. Instead, it can only be
+      -- accessed in request phases, which are represented by the `rewrite`,
+      -- `access`, `header_filter`, `body_filter`, and `log` phases of the plugin
+      -- interfaces.  Accessing this table in those functions (and their callees) is
+      -- fine.
+      --
+      -- Values inserted in this table by a plugin will be visible in successful
+      -- phases of this plugin's instance only. For example, if a plugin wants to
+      -- save some value for post-processing during the `log` phase:
+      --
+      -- @table kong.ctx.plugin
+      -- @phases rewrite, access, header_filter, body_filter, log
+      -- @usage
+      -- -- plugin handler.lua
+      --
+      -- function plugin_handler:access(conf)
+      --   kong.ctx.plugin.val_1 = "hello"
+      --   kong.ctx.plugin.val_2 = "world"
+      -- end
+      --
+      -- function plugin_handler:log(conf)
+      --   local value = kong.ctx.plugin.val_1 .. " " .. kong.ctx.plugin.val_2
+      --
+      --   kong.log(value) -- "hello world"
+      -- end
+      local function new(self)
+   73   local _CTX = {
+          -- those would be visible on the *.ctx namespace for now
+          -- TODO: hide them in a private table shared between this
+          -- module and the global.lua one
+   73     keys = setmetatable({}, { __mode = "k" }),
+        }
+
+
+   73   local _ctx_mt = {}
+
+
+   73   function _ctx_mt.__index(t, k)
+   16     local nctx = ngx.ctx
+          local key
+
+   16     if k == "core" then
+   16       key = _CTX_CORE_KEY
+
+****0     elseif k == "shared" then
+****0       key = _CTX_SHARED_KEY
+
+          else
+****0       key = t.keys[k]
+          end
+
+   16     if key then
+   16       local ctx = nctx[key]
+   16       if not ctx then
+   12         ctx = {}
+   12         nctx[key] = ctx
+            end
+
+   16       return ctx
+          end
+        end
+
+
+   73   return setmetatable(_CTX, _ctx_mt)
+      end
+
+
+   19 return {
+   19   new = new,
+   19 }
+
+==============================================================================
+./kong/pdk/init.lua
+==============================================================================
+      ---
+      -- The Plugin Development Kit (or "PDK") is set of Lua functions and variables
+      -- that can be used by plugins to implement their own logic. The PDK is a
+      -- [Semantically Versioned](https://semver.org/) component, originally
+      -- released in Kong 0.14.0. The PDK will be guaranteed to be forward-compatible
+      -- from its 1.0.0 release and on.
+      --
+      -- As of this release, the PDK has not yet reached 1.0.0, but plugin authors
+      -- can already depend on it for a safe and reliable way of interacting with the
+      -- request, response, or the core components.
+      --
+      -- The Plugin Development Kit is accessible from the `kong` global variable,
+      -- and various functionalities are namespaced under this table, such as
+      -- `kong.request`, `kong.log`, etc...
+      --
+      -- @module PDK
+      -- @release 0.1.0
+
+
+      ---
+      -- Top-level variables
+      -- @section top_level_variables
+
+
+      ---
+      -- A human-readable string containing the version number of the currently
+      -- running node.
+      --
+      -- @field kong.version
+      -- @usage print(kong.version) -- "0.14.0"
+
+
+      ---
+      -- An integral number representing the version number of the currently running
+      -- node, useful for comparison and feature-existence checks.
+      --
+      -- @field kong.version_num
+      -- @usage
+      -- if kong.version_num < 13000 then -- 000.130.00 -> 0.13.0
+      --   -- no support for Routes & Services
+      -- end
+
+
+      ---
+      -- A number representing the major version of the current PDK (e.g.
+      -- `1`). Useful for feature-existence checks or backwards-compatible behavior
+      -- as users of the PDK.
+      --
+      -- @field kong.pdk_major_version
+      -- @usage
+      -- if kong.pdk_version_num < 2 then
+      --   -- PDK is below version 2
+      -- end
+
+
+      ---
+      -- A human-readable string containing the version number of the current PDK.
+      --
+      -- @field kong.pdk_version
+      -- @usage print(kong.pdk_version) -- "0.1.0"
+
+
+      ---
+      -- A read-only table containing the configuration of the current Kong node,
+      -- based on the configuration file and environment variables.
+      --
+      -- See [kong.conf.default](https://github.com/Kong/kong/blob/master/kong.conf.default)
+      -- for details.
+      --
+      -- Comma-separated lists in that file get promoted to arrays of strings in this
+      -- table.
+      --
+      -- @field kong.configuration
+      -- @usage
+      -- print(kong.configuration.prefix) -- "/usr/local/kong"
+      -- -- this table is read-only; the following throws an error:
+      -- kong.configuration.custom_plugins = "foo"
+
+      --
+      --- Request/Response
+      -- @section request_response
+
+
+      --- Current request context data
+      -- @field kong.ctx
+      -- @redirect kong.ctx
+
+
+      --- Client information module
+      -- @field kong.client
+      -- @redirect kong.client
+
+
+      --- Client request module
+      -- @field kong.request
+      -- @redirect kong.request
+
+
+      --- Properties of the connection to the Service
+      -- @field kong.service
+      -- @redirect kong.service
+
+
+      --- Manipulation of the request to the Service
+      -- @field kong.service.request
+      -- @redirect kong.service.request
+
+
+      --- Manipulation of the response from the Service
+      -- @field kong.service.response
+      -- @redirect kong.service.response
+
+
+      --- Client response module
+      -- @field kong.response
+      -- @redirect kong.response
+
+
+      --- Router module
+      -- @field kong.router
+      -- @redirect kong.router
+
+
+      --- Singletons
+      -- @section singletons
+
+
+      ---
+      -- Instance of Kong's legacy DAO. This has the same interface as the object
+      -- returned by `new(config, db)` in the core's `kong.dao.factory` module.
+      --
+      -- * [Plugin Development Guide - Accessing the
+      -- Datastore](https://getkong.org/docs/latest/plugin-development/access-the-datastore/)
+      -- * Kong legacy DAO: https://github.com/Kong/kong/tree/master/kong/dao
+      --
+      -- @field kong.dao
+
+
+      ---
+      -- Instance of Kong's DAO (the new `kong.db` module). Contains accessor objects
+      -- to various entities.
+      --
+      -- A more thorough documentation of this DAO and new schema definitions is to
+      -- be made available in the future, once this object will replace the old DAO
+      -- as the standard interface with which to create custom entities in plugins.
+      --
+      -- @field kong.db
+      -- @usage
+      -- kong.db.services:insert()
+      -- kong.db.routes:select()
+
+
+      ---
+      -- Instance of Kong's DNS resolver, a client object from the
+      -- [lua-resty-dns-client](https://github.com/kong/lua-resty-dns-client) module.
+      --
+      -- **Note:** usage of this module is currently reserved to the core or to
+      -- advanced users.
+      --
+      -- @field kong.dns
+
+
+      ---
+      -- Instance of Kong's IPC module for inter-workers communication from the
+      -- [lua-resty-worker-events](https://github.com/Kong/lua-resty-worker-events)
+      -- module.
+      --
+      -- **Note:** usage of this module is currently reserved to the core or to
+      -- advanced users.
+      --
+      -- @field kong.worker_events
+
+
+      ---
+      -- Instance of Kong's cluster events module for inter-nodes communication.
+      --
+      -- **Note:** usage of this module is currently reserved to the core or to
+      -- advanced users.
+      --
+      -- @field kong.cluster_events
+
+
+      ---
+      -- Instance of Kong's database caching object, from the `kong.cache` module.
+      --
+      -- **Note:** usage of this module is currently reserved to the core or to
+      -- advanced users.
+      --
+      -- @field kong.cache
+
+      ---
+      -- Instance of Kong's IP module to determine whether a given IP address is
+      -- trusted
+      -- @field kong.ip
+      -- @redirect kong.ip
+
+      --- Utilities
+      -- @section utilities
+
+
+      --- Node-level utilities
+      -- @field kong.node
+      -- @redirect kong.node
+
+
+      --- Utilities for Lua tables
+      -- @field kong.table
+      -- @redirect kong.table
+
+
+      --- Instance of Kong logging factory with various utilities
+      -- @field kong.log
+      -- @redirect kong.log
+
+
+   19 require("resty.core")
+
+
+   19 local MAJOR_VERSIONS = {
+   19   [1] = {
+          version = "0.1.0",
+   19     modules = {
+            "table",
+            "node",
+            "log",
+            "ctx",
+            "ip",
+            "client",
+            "service",
+            "request",
+            "service.request",
+            "service.response",
+            "response",
+            "router",
+   19     },
+   19   },
+
+        latest = 1,
+      }
+
+
+   19 local _PDK = {
+   19   major_versions = MAJOR_VERSIONS,
+      }
+
+
+   19 function _PDK.new(kong_config, major_version, self)
+   73   if kong_config then
+   73     if type(kong_config) ~= "table" then
+****0       error("kong_config must be a table", 2)
+          end
+
+        else
+****0     kong_config = {}
+        end
+
+   73   if major_version then
+****0     if type(major_version) ~= "number" then
+****0       error("major_version must be a number", 2)
+          end
+
+        else
+   73     major_version = MAJOR_VERSIONS.latest
+        end
+
+   73   local version_meta = MAJOR_VERSIONS[major_version]
+
+   73   self = self or {}
+
+   73   self.pdk_major_version = major_version
+   73   self.pdk_version = version_meta.version
+
+  146   self.configuration = setmetatable({}, {
+          __index = function(_, v)
+   73       return kong_config[v]
+          end,
+
+          __newindex = function()
+****0       error("cannot write to configuration", 2)
+          end,
+   73   })
+
+  949   for _, module_name in ipairs(version_meta.modules) do
+  876     local parent = self
+ 1022     for part in module_name:gmatch("([^.]+)%.") do
+  146       if not parent[part] then
+****0         parent[part] = {}
+            end
+
+  146       parent = parent[part]
+          end
+
+  876     local child = module_name:match("[^.]*$")
+  876     if parent[child] then
+****0       error("PDK module '" .. module_name .. "' conflicts with a key")
+          end
+
+  876     local mod = require("kong.pdk." .. module_name)
+
+ 1752     parent[child] = mod.new(self)
+        end
+
+   73   return self
+      end
+
+
+   19 return _PDK
+
+==============================================================================
+./kong/pdk/ip.lua
+==============================================================================
+      ---
+      -- Trusted IPs module
+      --
+      -- This module can be used to determine whether or not a given IP address is
+      -- in the range of trusted IP addresses defined by the `trusted_ips` configuration
+      -- property.
+      --
+      -- Trusted IP addresses are those that are known to send correct replacement
+      -- addresses for clients (as per the chosen header field, e.g. X-Forwarded-*).
+      --
+      -- See [docs.konghq.com/latest/configuration/#trusted_ips](https://docs.konghq.com/latest/configuration/#trusted_ips)
+      --
+      -- @module kong.ip
+   19 local ip = require "resty.mediador.ip"
+
+      ---
+      -- Depending on the `trusted_ips` configuration property,
+      -- this function will return whether a given ip is trusted or not
+      --
+      -- Both ipv4 and ipv6 are supported.
+      --
+      -- @function kong.ip.is_trusted
+      -- @phases init_worker, certificate, rewrite, access, header_filter, body_filter, log
+      -- @tparam string address A string representing an IP address
+      -- @treturn boolean `true` if the IP is trusted, `false` otherwise
+      -- @usage
+      -- if kong.ip.is_trusted("1.1.1.1") then
+      --   kong.log("The IP is trusted")
+      -- end
+
+      local function new(self)
+   73   local _IP = {}
+
+  146   local ips = self.configuration.trusted_ips or {}
+   73   local n_ips = #ips
+   73   local trusted_ips = self.table.new(n_ips, 0)
+        local trust_all_ipv4
+        local trust_all_ipv6
+
+        -- This is because we don't support unix: that the ngx_http_realip module
+        -- supports.  Also as an optimization we will only compile trusted ips if
+        -- Kong is not run with the default 0.0.0.0/0, ::/0 aka trust all ip
+        -- addresses settings.
+   73   for i = 1, n_ips do
+****0     local address = ips[i]
+
+****0     if ip.valid(address) then
+****0       table.insert(trusted_ips, address)
+
+****0       if address == "0.0.0.0/0" then
+****0         trust_all_ipv4 = true
+
+****0       elseif address == "::/0" then
+****0         trust_all_ipv6 = true
+            end
+          end
+        end
+
+   73   if #trusted_ips == 0 then
+  109     _IP.is_trusted = function() return false end
+
+****0   elseif trust_all_ipv4 and trust_all_ipv6 then
+****0     _IP.is_trusted = function() return true end
+
+        else
+          -- do not load if not needed
+****0     local px = require "resty.mediador.proxy"
+
+****0     _IP.is_trusted = px.compile(trusted_ips)
+        end
+
+   73   return _IP
+      end
+
+
+   19 return {
+   19   new = new,
+   19 }
+
+==============================================================================
+./kong/pdk/log.lua
+==============================================================================
+      ---
+      -- This namespace contains an instance of a "logging facility", which is a
+      -- table containing all of the methods described below.
+      --
+      -- This instance is namespaced per plugin, and Kong will make sure that before
+      -- executing a plugin, it will swap this instance with a logging facility
+      -- dedicated to the plugin. This allows the logs to be prefixed with the
+      -- plugin's name for debugging purposes.
+      --
+      -- @module kong.log
+
+
+   19 local errlog = require "ngx.errlog"
+   19 local ngx_re = require "ngx.re"
+
+
+   19 local sub = string.sub
+   19 local type = type
+   19 local find = string.find
+   19 local select = select
+   19 local concat = table.concat
+   19 local getinfo = debug.getinfo
+   19 local reverse = string.reverse
+   19 local tostring = tostring
+   19 local setmetatable = setmetatable
+
+
+   19 local _PREFIX = "[kong] "
+   19 local _DEFAULT_FORMAT = "%file_src:%line_src %message"
+   19 local _DEFAULT_NAMESPACED_FORMAT = "%file_src:%line_src [%namespace] %message"
+
+
+   19 local _LEVELS = {
+   19   debug = ngx.DEBUG,
+   19   info = ngx.INFO,
+   19   notice = ngx.NOTICE,
+   19   warn = ngx.WARN,
+   19   err = ngx.ERR,
+   19   crit = ngx.CRIT,
+   19   alert = ngx.ALERT,
+   19   emerg = ngx.EMERG,
+      }
+
+
+   19 local _MODIFIERS = {
+   19   ["%file_src"] = {
+          flag = "S",
+          info = function(info)
+****0       local short_src = info.short_src
+****0       if short_src then
+****0         local rev_src = reverse(short_src)
+****0         local idx = find(rev_src, "/", nil, true)
+****0         if idx then
+****0           return sub(short_src, #rev_src - idx + 2)
+              end
+
+****0         return short_src
+            end
+          end
+   19   },
+
+   19   ["%line_src"] = {
+          flag = "l",
+          info_key = "currentline",
+   19   },
+
+   19   ["%func_name"] = {
+          flag = "n",
+          info_key = "name",
+   19   },
+
+   19   ["%message"] = {
+          message = true,
+   19   },
+
+        -- %namespace -- precompiled
+      }
+
+
+      local function parse_modifiers(format)
+   92   local buf, err = ngx_re.split(format, [==[(?<!%)(%[a-z_]+)]==], nil, nil, 0)
+   92   if not buf then
+****0     return nil, "could not parse format: " .. err
+        end
+
+   92   local buf_len = #buf
+
+  682   for i = 1, buf_len do
+  590     local mod = _MODIFIERS[buf[i]]
+  590     if mod then
+  295       if mod.message then
+   92         buf.message_idxs = buf.message_idxs or {}
+   92         table.insert(buf.message_idxs, i)
+
+            else
+  203         buf.debug_flags = (buf.debug_flags or "") .. mod.flag
+
+  203         buf.modifiers = buf.modifiers or {}
+  406         table.insert(buf.modifiers, {
+  203           idx = i,
+  203           info = mod.info,
+  203           info_key = mod.info_key,
+              })
+            end
+          end
+        end
+
+   92   buf.n_modifiers = buf.modifiers and #buf.modifiers or 0
+   92   buf.n_messages = buf.message_idxs and #buf.message_idxs or 0
+   92   buf.n_len = buf_len
+
+   92   return buf
+      end
+
+
+   19 local serializers = {
+        [1] = function(buf, to_string, ...)
+****0     buf[1] = to_string(select(1, ...))
+        end,
+
+        [2] = function(buf, to_string, ...)
+****0     buf[1] = to_string(select(1, ...))
+****0     buf[2] = to_string(select(2, ...))
+        end,
+
+        [3] = function(buf, to_string, ...)
+****0     buf[1] = to_string(select(1, ...))
+****0     buf[2] = to_string(select(2, ...))
+****0     buf[3] = to_string(select(3, ...))
+        end,
+
+        [4] = function(buf, to_string, ...)
+****0     buf[1] = to_string(select(1, ...))
+****0     buf[2] = to_string(select(2, ...))
+****0     buf[3] = to_string(select(3, ...))
+****0     buf[4] = to_string(select(4, ...))
+        end,
+
+        [5] = function(buf, to_string, ...)
+****0     buf[1] = to_string(select(1, ...))
+****0     buf[2] = to_string(select(2, ...))
+****0     buf[3] = to_string(select(3, ...))
+****0     buf[4] = to_string(select(4, ...))
+****0     buf[5] = to_string(select(5, ...))
+        end,
+      }
+
+
+      --- Write a log line to the location specified by the current Nginx
+      -- configuration block's `error_log` directive, with the `notice` level (similar
+      -- to `print()`).
+      --
+      -- The Nginx `error_log` directive is set via the `log_level`, `proxy_error_log`
+      -- and `admin_error_log` Kong configuration properties.
+      --
+      -- Arguments given to this function will be concatenated similarly to
+      -- `ngx.log()`, and the log line will report the Lua file and line number from
+      -- which it was invoked. Unlike `ngx.log()`, this function will prefix error
+      -- messages with `[kong]` instead of `[lua]`.
+      --
+      -- Arguments given to this function can be of any type, but table arguments
+      -- will be converted to strings via `tostring` (thus potentially calling a
+      -- table's `__tostring` metamethod if set). This behavior differs from
+      -- `ngx.log()` (which only accepts table arguments if they define the
+      -- `__tostring` metamethod) with the intent to simplify its usage and be more
+      -- forgiving and intuitive.
+      --
+      -- Produced log lines have the following format when logging is invoked from
+      -- within the core:
+      --
+      -- ``` plain
+      -- [kong] %file_src:%line_src %message
+      -- ```
+      --
+      -- In comparison, log lines produced by plugins have the following format:
+      --
+      -- ``` plain
+      -- [kong] %file_src:%line_src [%namespace] %message
+      -- ```
+      --
+      -- Where:
+      --
+      -- * `%namespace`: is the configured namespace (the plugin name in this case).
+      -- * `%file_src`: is the file name from where the log was called from.
+      -- * `%line_src`: is the line number from where the log was called from.
+      -- * `%message`: is the message, made of concatenated arguments given by the caller.
+      --
+      -- For example, the following call:
+      --
+      -- ``` lua
+      -- kong.log("hello ", "world")
+      -- ```
+      --
+      -- would, within the core, produce a log line similar to:
+      --
+      -- ``` plain
+      -- 2017/07/09 19:36:25 [notice] 25932#0: *1 [kong] some_file.lua:54 hello world, client: 127.0.0.1, server: localhost, request: "GET /log HTTP/1.1", host: "localhost"
+      -- ```
+      --
+      -- If invoked from within a plugin (e.g. `key-auth`) it would include the
+      -- namespace prefix, like so:
+      --
+      -- ``` plain
+      -- 2017/07/09 19:36:25 [notice] 25932#0: *1 [kong] some_file.lua:54 [key-auth] hello world, client: 127.0.0.1, server: localhost, request: "GET /log HTTP/1.1", host: "localhost"
+      -- ```
+      --
+      -- @function kong.log
+      -- @phases init_worker, certificate, rewrite, access, header_filter, body_filter, log
+      -- @param ... all params will be concatenated and stringified before being sent to the log
+      -- @return Nothing; throws an error on invalid inputs.
+      --
+      -- @usage
+      -- kong.log("hello ", "world") -- alias to kong.log.notice()
+
+      ---
+      -- Similar to `kong.log()`, but the produced log will have the severity given by
+      -- `<level>`, instead of `notice`. The supported levels are:
+      --
+      -- * `kong.log.alert()`
+      -- * `kong.log.crit()`
+      -- * `kong.log.err()`
+      -- * `kong.log.warn()`
+      -- * `kong.log.notice()`
+      -- * `kong.log.info()`
+      -- * `kong.log.debug()`
+      --
+      -- Logs have the same format as that of `kong.log()`. For
+      -- example, the following call:
+      --
+      -- ``` lua
+      --  kong.log.err("hello ", "world")
+      -- ```
+      --
+      -- would, within the core, produce a log line similar to:
+      --
+      -- ``` plain
+      -- 2017/07/09 19:36:25 [error] 25932#0: *1 [kong] some_file.lua:54 hello world, client: 127.0.0.1, server: localhost, request: "GET /log HTTP/1.1", host: "localhost"
+      -- ```
+      --
+      -- If invoked from within a plugin (e.g. `key-auth`) it would include the
+      -- namespace prefix, like so:
+      --
+      -- ``` plain
+      -- 2017/07/09 19:36:25 [error] 25932#0: *1 [kong] some_file.lua:54 [key-auth] hello world, client: 127.0.0.1, server: localhost, request: "GET /log HTTP/1.1", host: "localhost"
+      -- ```
+      --
+      -- @function kong.log.LEVEL
+      -- @phases init_worker, certificate, rewrite, access, header_filter, body_filter, log
+      -- @param ... all params will be concatenated and stringified before being sent to the log
+      -- @return Nothing; throws an error on invalid inputs.
+      -- @usage
+      -- kong.log.warn("something require attention")
+      -- kong.log.err("something failed: ", err)
+      -- kong.log.alert("something requires immediate action")
+      local function gen_log_func(lvl_const, imm_buf, to_string, stack_level, sep)
+  657   to_string = to_string or tostring
+  657   stack_level = stack_level or 2
+
+        local sys_log_level
+  657   local variadic_buf = {}
+
+        return function(...)
+****0     if not sys_log_level and ngx.get_phase() ~= "init" then
+            -- only grab sys_log_level after init_by_lua, where it is
+            -- hard-coded
+****0       sys_log_level = errlog.get_sys_filter_level()
+          end
+
+****0     if sys_log_level and lvl_const > sys_log_level then
+            -- early exit if sys_log_level is higher than the current
+            -- log call
+****0       return
+          end
+
+****0     local n = select("#", ...)
+
+****0     if imm_buf.debug_flags then
+****0       local info = getinfo(stack_level, imm_buf.debug_flags)
+
+****0       for i = 1, imm_buf.n_modifiers do
+****0         local mod = imm_buf.modifiers[i]
+
+****0         if not info then
+****0           imm_buf[mod.idx] = "?"
+
+****0         elseif mod.info then
+****0           imm_buf[mod.idx] = mod.info(info) or "?"
+
+              else
+****0           imm_buf[mod.idx] = info[mod.info_key] or "?"
+              end
+            end
+          end
+
+****0     if serializers[n] then
+****0       serializers[n](variadic_buf, to_string, ...)
+
+          else
+****0       for i = 1, n do
+****0         variadic_buf[i] = to_string(select(i, ...))
+            end
+          end
+
+****0     local msg = concat(variadic_buf, sep, 1, n)
+
+****0     for i = 1, imm_buf.n_messages do
+****0       imm_buf[imm_buf.message_idxs[i]] = msg
+          end
+
+****0     errlog.raw_log(lvl_const, concat(imm_buf, nil, 1, imm_buf.n_len))
+        end
+      end
+
+
+      ---
+      -- Like `kong.log()`, this function will produce a log with the `notice` level,
+      -- and accepts any number of arguments as well. If inspect logging is disabled
+      -- via `kong.log.inspect.off()`, then this function prints nothing, and is
+      -- aliased to a "NOP" function in order to save CPU cycles.
+      --
+      -- ``` lua
+      -- kong.log.inspect("...")
+      -- ```
+      --
+      -- This function differs from `kong.log()` in the sense that arguments will be
+      -- concatenated with a space(`" "`), and each argument will be
+      -- "pretty-printed":
+      --
+      -- * numbers will printed (e.g. `5` -> `"5"`)
+      -- * strings will be quoted (e.g. `"hi"` -> `'"hi"'`)
+      -- * array-like tables will be rendered (e.g. `{1,2,3}` -> `"{1, 2, 3}"`)
+      -- * dictionary-like tables will be rendered on multiple lines
+      --
+      -- This function is intended for use with debugging purposes in mind, and usage
+      -- in production code paths should be avoided due to the expensive formatting
+      -- operations it can perform. Existing statements can be left in production code
+      -- but nopped by calling `kong.log.inspect.off()`.
+      --
+      -- When writing logs, `kong.log.inspect()` always uses its own format, defined
+      -- as:
+      --
+      -- ``` plain
+      -- %file_src:%func_name:%line_src %message
+      -- ```
+      --
+      -- Where:
+      --
+      -- * `%file_src`: is the file name from where the log was called from.
+      -- * `%func_name`: is the name of the function from where the log was called
+      --   from.
+      -- * `%line_src`: is the line number from where the log was called from.
+      -- * `%message`: is the message, made of concatenated, pretty-printed arguments
+      --   given by the caller.
+      --
+      -- This function uses the [inspect.lua](https://github.com/kikito/inspect.lua)
+      -- library to pretty-print its arguments.
+      --
+      -- @function kong.log.inspect
+      -- @phases init_worker, certificate, rewrite, access, header_filter, body_filter, log
+      -- @param ... Parameters will be concatenated with spaces between them and
+      -- rendered as described
+      -- @usage
+      -- kong.log.inspect("some value", a_variable)
+      local new_inspect
+
+      do
+   19   local inspect = require "inspect"
+
+
+   19   local _INSPECT_FORMAT = _PREFIX .. "%file_src:%func_name:%line_src %message"
+   38   local inspect_buf = assert(parse_modifiers(_INSPECT_FORMAT))
+   19   local function nop() end
+
+
+   19   local _inspect_mt = {
+          __call = function(self, ...)
+****0       self.print(...)
+          end,
+        }
+
+
+        new_inspect = function(format)
+   73     local self = {}
+
+
+          ---
+          -- Enables inspect logs for this logging facility. Calls to
+          -- `kong.log.inspect` will be writing log lines with the appropriate
+          -- formatting of arguments.
+          --
+          -- @function kong.log.inspect.on
+          -- @phases init_worker, certificate, rewrite, access, header_filter, body_filter, log
+          -- @usage
+          -- kong.log.inspect.on()
+   73     function self.on()
+  146       self.print = gen_log_func(_LEVELS.notice, inspect_buf, inspect, 3, " ")
+          end
+
+
+          ---
+          -- Disables inspect logs for this logging facility. All calls to
+          -- `kong.log.inspect()` will be nopped.
+          --
+          -- @function kong.log.inspect.off
+          -- @phases init_worker, certificate, rewrite, access, header_filter, body_filter, log
+          -- @usage
+          -- kong.log.inspect.off()
+   73     function self.off()
+****0       self.print = nop
+          end
+
+   73     self.on()
+
+   73     return setmetatable(self, _inspect_mt)
+        end
+      end
+
+
+   19 local _log_mt = {
+        __call = function(self, ...)
+****0     return self.notice(...)
+        end,
+      }
+
+
+      local function new_log(namespace, format)
+   73   if type(namespace) ~= "string" then
+****0     error("namespace must be a string", 2)
+        end
+
+   73   if namespace == "" then
+****0     error("namespace cannot be an empty string", 2)
+        end
+
+   73   if format then
+   73     if type(format) ~= "string" then
+****0       error("format must be a string if specified", 2)
+          end
+
+   73     if format == "" then
+****0       error("format cannot be an empty string if specified", 2)
+          end
+        end
+
+   73   local self = {}
+
+
+   73   function self.set_format(fmt)
+   73     if fmt and type(fmt) ~= "string" then
+****0       error("format must be a string", 2)
+
+   73     elseif not fmt then
+****0       fmt = _DEFAULT_NAMESPACED_FORMAT
+          end
+
+          -- pre-compile namespace into format
+   73     local format = _PREFIX .. fmt:gsub("([^%%])%%namespace", "%1" .. namespace)
+
+   73     local buf, err = parse_modifiers(format)
+   73     if not buf then
+****0       error(err, 2)
+          end
+
+  657     for log_lvl_name, log_lvl in pairs(_LEVELS) do
+ 1168       self[log_lvl_name] = gen_log_func(log_lvl, buf)
+          end
+        end
+
+
+   73   self.set_format(format)
+
+  146   self.inspect = new_inspect(format)
+
+   73   return setmetatable(self, _log_mt)
+      end
+
+
+   19 _log_mt.__index = _log_mt
+   19 _log_mt.new = new_log
+
+
+   19 return {
+        new = function()
+   73     return new_log("core", _DEFAULT_FORMAT)
+        end,
+   19 }
+
+==============================================================================
+./kong/pdk/node.lua
+==============================================================================
+      --- Node-level utilities
+      --
+      -- @module kong.node
+
+   19 local utils = require "kong.tools.utils"
+
+
+   19 local NODE_ID_KEY = "kong:node_id"
+
+
+      local node_id
+
+
+      local function new(self)
+   73   local _NODE = {}
+
+
+        ---
+        -- Returns the id used by this node to describe itself.
+        --
+        -- @function kong.node.get_id
+        -- @treturn string The v4 UUID used by this node as its id
+        -- @usage
+        -- local id = kong.node.get_id()
+   73   function _NODE.get_id()
+   14     if node_id then
+   13       return node_id
+          end
+
+    1     local shm = ngx.shared.kong
+
+    2     local ok, err = shm:safe_add(NODE_ID_KEY, utils.uuid())
+    1     if not ok and err ~= "exists" then
+****0       error("failed to set 'node_id' in shm: " .. err)
+          end
+
+    2     node_id, err = shm:get(NODE_ID_KEY)
+    1     if err then
+****0       error("failed to get 'node_id' in shm: " .. err)
+          end
+
+    1     if not node_id then
+****0       error("no 'node_id' set in shm")
+          end
+
+    1     return node_id
+        end
+
+
+   73   return _NODE
+      end
+
+
+   19 return {
+   19   new = new,
+   19 }
+
+==============================================================================
+./kong/pdk/request.lua
+==============================================================================
+      --- Client request module
+      -- A set of functions to retrieve information about the incoming requests made
+      -- by clients.
+      --
+      -- @module kong.request
+
+
+   19 local cjson = require "cjson.safe"
+   19 local multipart = require "multipart"
+   19 local phase_checker = require "kong.pdk.private.phases"
+
+
+   19 local ngx = ngx
+   19 local sub = string.sub
+   19 local find = string.find
+   19 local lower = string.lower
+   19 local type = type
+   19 local error = error
+   19 local tonumber = tonumber
+   19 local check_phase = phase_checker.check
+   19 local check_not_phase = phase_checker.check_not
+
+
+   19 local PHASES = phase_checker.phases
+
+
+      local function new(self)
+   73   local _REQUEST = {}
+
+
+   73   local MIN_HEADERS            = 1
+   73   local MAX_HEADERS_DEFAULT    = 100
+   73   local MAX_HEADERS            = 1000
+   73   local MIN_QUERY_ARGS         = 1
+   73   local MAX_QUERY_ARGS_DEFAULT = 100
+   73   local MAX_QUERY_ARGS         = 1000
+   73   local MIN_POST_ARGS          = 1
+   73   local MAX_POST_ARGS_DEFAULT  = 100
+   73   local MAX_POST_ARGS          = 1000
+
+   73   local MIN_PORT               = 1
+   73   local MAX_PORT               = 65535
+
+   73   local CONTENT_TYPE           = "Content-Type"
+
+   73   local CONTENT_TYPE_POST      = "application/x-www-form-urlencoded"
+   73   local CONTENT_TYPE_JSON      = "application/json"
+   73   local CONTENT_TYPE_FORM_DATA = "multipart/form-data"
+
+   73   local X_FORWARDED_PROTO      = "X-Forwarded-Proto"
+   73   local X_FORWARDED_HOST       = "X-Forwarded-Host"
+   73   local X_FORWARDED_PORT       = "X-Forwarded-Port"
+
+
+        ---
+        -- Returns the scheme component of the request's URL. The returned value is
+        -- normalized to lower-case form.
+        --
+        -- @function kong.request.get_scheme
+        -- @phases rewrite, access, header_filter, body_filter, log, admin_api
+        -- @treturn string a string like `"http"` or `"https"`
+        -- @usage
+        -- -- Given a request to https://example.com:1234/v1/movies
+        --
+        -- kong.request.get_scheme() -- "https"
+   73   function _REQUEST.get_scheme()
+   26     check_phase(PHASES.request)
+
+   49     return ngx.var.scheme
+        end
+
+
+        ---
+        -- Returns the host component of the request's URL, or the value of the
+        -- "Host" header. The returned value is normalized to lower-case form.
+        --
+        -- @function kong.request.get_host
+        -- @phases rewrite, access, header_filter, body_filter, log, admin_api
+        -- @treturn string the host
+        -- @usage
+        -- -- Given a request to https://example.com:1234/v1/movies
+        --
+        -- kong.request.get_host() -- "example.com"
+   73   function _REQUEST.get_host()
+   26     check_phase(PHASES.request)
+
+   49     return ngx.var.host
+        end
+
+
+        ---
+        -- Returns the port component of the request's URL. The value is returned
+        -- as a Lua number.
+        --
+        -- @function kong.request.get_port
+        -- @phases certificate, rewrite, access, header_filter, body_filter, log, admin_api
+        -- @treturn number the port
+        -- @usage
+        -- -- Given a request to https://example.com:1234/v1/movies
+        --
+        -- kong.request.get_port() -- 1234
+   73   function _REQUEST.get_port()
+   26     check_not_phase(PHASES.init_worker)
+
+   49     return tonumber(ngx.var.server_port)
+        end
+
+
+        ---
+        -- Returns the scheme component of the request's URL, but also considers
+        -- `X-Forwarded-Proto` if it comes from a trusted source. The returned
+        -- value is normalized to lower-case.
+        --
+        -- Whether this function considers `X-Forwarded-Proto` or not depends on
+        -- several Kong configuration parameters:
+        --
+        -- * [trusted\_ips](https://getkong.org/docs/latest/configuration/#trusted_ips)
+        -- * [real\_ip\_header](https://getkong.org/docs/latest/configuration/#real_ip_header)
+        -- * [real\_ip\_recursive](https://getkong.org/docs/latest/configuration/#real_ip_recursive)
+        --
+        -- **Note**: support for the Forwarded HTTP Extension (RFC 7239) is not
+        -- offered yet since it is not supported by ngx\_http\_realip\_module.
+        --
+        -- @function kong.request.get_forwarded_scheme
+        -- @phases rewrite, access, header_filter, body_filter, log, admin_api
+        -- @treturn string the forwarded scheme
+        -- @usage
+        -- kong.request.get_forwarded_scheme() -- "https"
+   73   function _REQUEST.get_forwarded_scheme()
+   14     check_phase(PHASES.request)
+
+   37     if self.ip.is_trusted(self.client.get_ip()) then
+****0       local scheme = _REQUEST.get_header(X_FORWARDED_PROTO)
+****0       if scheme then
+****0         return lower(scheme)
+            end
+          end
+
+   12     return _REQUEST.get_scheme()
+        end
+
+
+        ---
+        -- Returns the host component of the request's URL or the value of the "host"
+        -- header. Unlike `kong.request.get_host()`, this function will also consider
+        -- `X-Forwarded-Host` if it comes from a trusted source. The returned value
+        -- is normalized to lower-case.
+        --
+        -- Whether this function considers `X-Forwarded-Proto` or not depends on
+        -- several Kong configuration parameters:
+        --
+        -- * [trusted\_ips](https://getkong.org/docs/latest/configuration/#trusted_ips)
+        -- * [real\_ip\_header](https://getkong.org/docs/latest/configuration/#real_ip_header)
+        -- * [real\_ip\_recursive](https://getkong.org/docs/latest/configuration/#real_ip_recursive)
+        --
+        -- **Note**: we do not currently offer support for Forwarded HTTP Extension
+        -- (RFC 7239) since it is not supported by ngx_http_realip_module.
+        --
+        -- @function kong.request.get_forwarded_host
+        -- @phases rewrite, access, header_filter, body_filter, log, admin_api
+        -- @treturn string the forwarded host
+        -- @usage
+        -- kong.request.get_forwarded_host() -- "example.com"
+   73   function _REQUEST.get_forwarded_host()
+   14     check_phase(PHASES.request)
+
+   37     if self.ip.is_trusted(self.client.get_ip()) then
+****0       local host = _REQUEST.get_header(X_FORWARDED_HOST)
+****0       if host then
+****0         local s = find(host, "@", 1, true)
+****0         if s then
+****0           host = sub(host, s + 1)
+              end
+
+****0         s = find(host, ":", 1, true)
+****0         return s and lower(sub(host, 1, s - 1)) or lower(host)
+            end
+          end
+
+   12     return _REQUEST.get_host()
+        end
+
+
+        ---
+        -- Returns the port component of the request's URL, but also considers
+        -- `X-Forwarded-Host` if it comes from a trusted source. The value
+        -- is returned as a Lua number.
+        --
+        -- Whether this function considers `X-Forwarded-Proto` or not depends on
+        -- several Kong configuration parameters:
+        --
+        -- * [trusted\_ips](https://getkong.org/docs/latest/configuration/#trusted_ips)
+        -- * [real\_ip\_header](https://getkong.org/docs/latest/configuration/#real_ip_header)
+        -- * [real\_ip\_recursive](https://getkong.org/docs/latest/configuration/#real_ip_recursive)
+        --
+        -- **Note**: we do not currently offer support for Forwarded HTTP Extension
+        -- (RFC 7239) since it is not supported by ngx_http_realip_module.
+        --
+        -- @function kong.request.get_forwareded_port
+        -- @phases rewrite, access, header_filter, body_filter, log, admin_api
+        -- @treturn number the forwared port
+        -- @usage
+        -- kong.request.get_forwarded_port() -- 1234
+   73   function _REQUEST.get_forwarded_port()
+   14     check_phase(PHASES.request)
+
+   37     if self.ip.is_trusted(self.client.get_ip()) then
+****0       local port = tonumber(_REQUEST.get_header(X_FORWARDED_PORT))
+****0       if port and port >= MIN_PORT and port <= MAX_PORT then
+****0         return port
+            end
+
+****0       local host = _REQUEST.get_header(X_FORWARDED_HOST)
+****0       if host then
+****0         local s = find(host, "@", 1, true)
+****0         if s then
+****0           host = sub(host, s + 1)
+              end
+
+****0         s = find(host, ":", 1, true)
+****0         if s then
+****0           port = tonumber(sub(host, s + 1))
+
+****0           if port and port >= MIN_PORT and port <= MAX_PORT then
+****0             return port
+                end
+              end
+            end
+          end
+
+   12     return _REQUEST.get_port()
+        end
+
+
+        ---
+        -- Returns the HTTP version used by the client in the request as a Lua
+        -- number, returning values such as `"1.1"` and `"2.0."`, or `nil` for
+        -- unrecognized values.
+        --
+        -- @function kong.request.get_http_version
+        -- @phases rewrite, access, header_filter, body_filter, log, admin_api
+        -- @treturn string|nil the http version
+        -- @usage
+        -- kong.request.get_http_version() -- "1.1"
+   73   function _REQUEST.get_http_version()
+   14     check_phase(PHASES.request)
+
+   13     return ngx.req.http_version()
+        end
+
+
+        ---
+        -- Returns the HTTP method of the request. The value is normalized to
+        -- upper-case.
+        --
+        -- @function kong.request.get_method
+        -- @phases rewrite, access, header_filter, body_filter, log, admin_api
+        -- @treturn string the request method
+        -- @usage
+        -- kong.request.get_method() -- "GET"
+   73   function _REQUEST.get_method()
+   14     check_phase(PHASES.request)
+
+   13     return ngx.req.get_method()
+        end
+
+
+        ---
+        -- Returns the path component of the request's URL. It is not normalized in
+        -- any way and does not include the querystring.
+        --
+        -- @function kong.request.get_path
+        -- @phases rewrite, access, header_filter, body_filter, log, admin_api
+        -- @treturn string the path
+        -- @usage
+        -- -- Given a request to https://example.com:1234/v1/movies?movie=foo
+        --
+        -- kong.request.get_path() -- "/v1/movies"
+   73   function _REQUEST.get_path()
+   14     check_phase(PHASES.request)
+
+   25     local uri = ngx.var.request_uri or ""
+   12     local s = find(uri, "?", 2, true)
+   12     return s and sub(uri, 1, s - 1) or uri
+        end
+
+
+        ---
+        -- Returns the path, including the querystring if any. No
+        -- transformations/normalizations are done.
+        --
+        -- @function kong.request.get_path_with_query()
+        -- @phases rewrite, access, header_filter, body_filter, log, admin_api
+        -- @treturn string the path with the querystring
+        -- @usage
+        -- -- Given a request to https://example.com:1234/v1/movies?movie=foo
+        --
+        -- kong.request.get_raw_path_and_query() -- "/v1/movies?movie=foo"
+   73   function _REQUEST.get_path_with_query()
+   14     check_phase(PHASES.request)
+   25     return ngx.var.request_uri or ""
+        end
+
+
+        ---
+        -- Returns the query component of the request's URL. It is not normalized in
+        -- any way (not even URL-decoding of special characters) and does not
+        -- include the leading `?` character.
+        --
+        -- @function kong.request.get_raw_query
+        -- @phases rewrite, access, header_filter, body_filter, log, admin_api
+        -- @return string the query component of the request's URL
+        -- @usage
+        -- -- Given a request to https://example.com/foo?msg=hello%20world&bla=&bar
+        --
+        -- kong.request.get_raw_query() -- "msg=hello%20world&bla=&bar"
+   73   function _REQUEST.get_raw_query()
+   14     check_phase(PHASES.request)
+
+   25     return ngx.var.args or ""
+        end
+
+
+        ---
+        -- Returns the value of the specified argument, obtained from the query
+        -- arguments of the current request.
+        --
+        -- The returned value is either a `string`, a boolean `true` if an
+        -- argument was not given a value, or `nil` if no argument with `name` was
+        -- found.
+        --
+        -- If an argument with the same name is present multiple times in the
+        -- querystring, this function will return the value of the first occurrence.
+        --
+        -- @function kong.request.get_query_arg
+        -- @phases rewrite, access, header_filter, body_filter, log, admin_api
+        -- @treturn string|boolean|nil the value of the argument
+        -- @usage
+        -- -- Given a request GET /test?foo=hello%20world&bar=baz&zzz&blo=&bar=bla&bar
+        --
+        -- kong.request.get_query_arg("foo") -- "hello world"
+        -- kong.request.get_query_arg("bar") -- "baz"
+        -- kong.request.get_query_arg("zzz") -- true
+        -- kong.request.get_query_arg("blo") -- ""
+   73   function _REQUEST.get_query_arg(name)
+   14     check_phase(PHASES.request)
+
+   13     if type(name) ~= "string" then
+****0       error("query argument name must be a string", 2)
+          end
+
+   25     local arg_value = _REQUEST.get_query()[name]
+   12     if type(arg_value) == "table" then
+****0       return arg_value[1]
+          end
+
+   12     return arg_value
+        end
+
+
+        ---
+        -- Returns the table of query arguments obtained from the querystring. Keys
+        -- are query argument names. Values are either a string with the argument
+        -- value, a boolean `true` if an argument was not given a value, or an array
+        -- if an argument was given in the query string multiple times. Keys and
+        -- values are unescaped according to URL-encoded escaping rules.
+        --
+        -- Note that a query string `?foo&bar` translates to two boolean `true`
+        -- arguments, and `?foo=&bar=` translates to two string arguments containing
+        -- empty strings.
+        --
+        -- By default, this function returns up to **100** arguments. The optional
+        -- `max_args` argument can be specified to customize this limit, but must be
+        -- greater than **1** and not greater than **1000**.
+        --
+        -- @function kong.request.get_query
+        -- @phases rewrite, access, header_filter, body_filter, log, admin_api
+        -- @tparam[opt] number max_args set a limit on the maximum number of parsed
+        -- arguments
+        -- @treturn table A table representation of the query string
+        -- @usage
+        -- -- Given a request GET /test?foo=hello%20world&bar=baz&zzz&blo=&bar=bla&bar
+        --
+        -- for k, v in pairs(kong.request.get_query()) do
+        --   kong.log.inspect(k, v)
+        -- end
+        --
+        -- -- Will print
+        -- -- "foo" "hello world"
+        -- -- "bar" {"baz", "bla", true}
+        -- -- "zzz" true
+        -- -- "blo" ""
+   73   function _REQUEST.get_query(max_args)
+   41     check_phase(PHASES.request)
+
+   39     if max_args == nil then
+   26       return ngx.req.get_uri_args(MAX_QUERY_ARGS_DEFAULT)
+          end
+
+   13     if type(max_args) ~= "number" then
+****0       error("max_args must be a number", 2)
+          end
+
+   13     if max_args < MIN_QUERY_ARGS then
+****0       error("max_args must be >= " .. MIN_QUERY_ARGS, 2)
+          end
+
+   13     if max_args > MAX_QUERY_ARGS then
+****0       error("max_args must be <= " .. MAX_QUERY_ARGS, 2)
+          end
+
+   13     return ngx.req.get_uri_args(max_args)
+        end
+
+
+        ---
+        -- Returns the value of the specified request header.
+        --
+        -- The returned value is either a `string`, or can be `nil` if a header with
+        -- `name` was not found in the request. If a header with the same name is
+        -- present multiple times in the request, this function will return the value
+        -- of the first occurrence of this header.
+        --
+        -- Header names in are case-insensitive and are normalized to lowercase, and
+        -- dashes (`-`) can be written as underscores (`_`); that is, the header
+        -- `X-Custom-Header` can also be retrieved as `x_custom_header`.
+        --
+        -- @function kong.request.get_header
+        -- @phases rewrite, access, header_filter, body_filter, log, admin_api
+        -- @tparam string name the name of the header to be returned
+        -- @treturn string|nil the value of the header or nil if not present
+        -- @usage
+        -- -- Given a request with the following headers:
+        --
+        -- -- Host: foo.com
+        -- -- X-Custom-Header: bla
+        -- -- X-Another: foo bar
+        -- -- X-Another: baz
+        --
+        -- kong.request.get_header("Host")            -- "foo.com"
+        -- kong.request.get_header("x-custom-header") -- "bla"
+        -- kong.request.get_header("X-Another")       -- "foo bar"
+   73   function _REQUEST.get_header(name)
+   14     check_phase(PHASES.request)
+
+   13     if type(name) ~= "string" then
+****0       error("header name must be a string", 2)
+          end
+
+   25     local header_value = _REQUEST.get_headers()[name]
+   12     if type(header_value) == "table" then
+****0       return header_value[1]
+          end
+
+   12     return header_value
+        end
+
+
+        ---
+        -- Returns a Lua table holding the request headers. Keys are header names.
+        -- Values are either a string with the header value, or an array of strings
+        -- if a header was sent multiple times. Header names in this table are
+        -- case-insensitive and are normalized to lowercase, and dashes (`-`) can be
+        -- written as underscores (`_`); that is, the header `X-Custom-Header` can
+        -- also be retrieved as `x_custom_header`.
+        --
+        -- By default, this function returns up to **100** headers. The optional
+        -- `max_headers` argument can be specified to customize this limit, but must
+        -- be greater than **1** and not greater than **1000**.
+        --
+        -- @function kong.request.get_headers
+        -- @phases rewrite, access, header_filter, body_filter, log, admin_api
+        -- @tparam[opt] number max_headers set a limit on the maximum number of
+        -- parsed headers
+        -- @treturn table the request headers in table form
+        -- @usage
+        -- -- Given a request with the following headers:
+        --
+        -- -- Host: foo.com
+        -- -- X-Custom-Header: bla
+        -- -- X-Another: foo bar
+        -- -- X-Another: baz
+        -- local headers = kong.request.get_headers()
+        --
+        -- headers.host            -- "foo.com"
+        -- headers.x_custom_header -- "bla"
+        -- headers.x_another[1]    -- "foo bar"
+        -- headers["X-Another"][2] -- "baz"
+   73   function _REQUEST.get_headers(max_headers)
+   41     check_phase(PHASES.request)
+
+   39     if max_headers == nil then
+   26       return ngx.req.get_headers(MAX_HEADERS_DEFAULT)
+          end
+
+   13     if type(max_headers) ~= "number" then
+****0       error("max_headers must be a number", 2)
+
+   13     elseif max_headers < MIN_HEADERS then
+****0       error("max_headers must be >= " .. MIN_HEADERS, 2)
+
+   13     elseif max_headers > MAX_HEADERS then
+****0       error("max_headers must be <= " .. MAX_HEADERS, 2)
+          end
+
+   13     return ngx.req.get_headers(max_headers)
+        end
+
+
+   73   local before_content = phase_checker.new(PHASES.rewrite, PHASES.access, PHASES.admin_api)
+
+
+        ---
+        -- Returns the plain request body.
+        --
+        -- If the body has no size (empty), this function returns an empty string.
+        --
+        -- If the size of the body is greater than the Nginx buffer size (set by
+        -- `client_body_buffer_size`), this function will fail and return an error
+        -- message explaining this limitation.
+        --
+        -- @function kong.request.get_raw_body
+        -- @phases rewrite, access, admin_api
+        -- @treturn string the plain request body
+        -- @usage
+        -- -- Given a body with payload "Hello, Earth!":
+        --
+        -- kong.request.get_raw_body():gsub("Earth", "Mars") -- "Hello, Mars!"
+   73   function _REQUEST.get_raw_body()
+   24     check_phase(before_content)
+
+   20     ngx.req.read_body()
+
+   12     local body = ngx.req.get_body_data()
+   12     if not body then
+   12       if ngx.req.get_body_file() then
+****0         return nil, "request body did not fit into client body buffer, consider raising 'client_body_buffer_size'"
+
+            else
+   12         return ""
+            end
+          end
+
+****0     return body
+        end
+
+
+        ---
+        -- Returns the request data as a key/value table.
+        -- A high-level convenience function.
+        -- The body is parsed with the most appropriate format:
+        --
+        -- * If `mimetype` is specified:
+        --   * Decodes the body with the requested content type (if supported).
+        -- * If the request content type is `application/x-www-form-urlencoded`:
+        --   * Returns the body as form-encoded.
+        -- * If the request content type is `multipart/form-data`:
+        --   * Decodes the body as multipart form data
+        --     (same as `multipart(kong.request.get_raw_body(),
+        --     kong.request.get_header("Content-Type")):get_all()` ).
+        -- * If the request content type is `application/json`:
+        --   * Decodes the body as JSON
+        --     (same as `json.decode(kong.request.get_raw_body())`).
+        --   * JSON types are converted to matching Lua types.
+        -- * If none of the above, returns `nil` and an error message indicating the
+        --   body could not be parsed.
+        --
+        -- The optional argument `mimetype` can be one of the following strings:
+        --
+        -- * `application/x-www-form-urlencoded`
+        -- * `application/json`
+        -- * `multipart/form-data`
+        --
+        -- The optional argument `max_args` can be used to set a limit on the number
+        -- of form arguments parsed for `application/x-www-form-urlencoded` payloads.
+        --
+        -- The third return value is string containing the mimetype used to parsed
+        -- the body (as per the `mimetype` argument), allowing the caller to identify
+        -- what MIME type the body was parsed as.
+        --
+        -- @function kong.request.get_body
+        -- @phases rewrite, access, admin_api
+        -- @tparam[opt] string mimetype the MIME type
+        -- @tparam[opt] number max_args set a limit on the maximum number of parsed
+        -- arguments
+        -- @treturn table|nil a table representation of the body
+        -- @treturn string|nil an error message
+        -- @treturn string|nil mimetype the MIME type used
+        -- @usage
+        -- local body, err, mimetype = kong.request.get_body()
+        -- body.name -- "John Doe"
+        -- body.age  -- "42"
+   73   function _REQUEST.get_body(mimetype, max_args)
+   28     check_phase(before_content)
+
+   20     local content_type = mimetype or _REQUEST.get_header(CONTENT_TYPE)
+   20     if not content_type then
+****0       return nil, "missing content type"
+          end
+
+   20     local content_type_lower = lower(content_type)
+          do
+   20       local s = find(content_type_lower, ";", 1, true)
+   20       if s then
+****0         content_type_lower = sub(content_type_lower, 1, s - 1)
+            end
+          end
+
+   20     if find(content_type_lower, CONTENT_TYPE_POST, 1, true) == 1 then
+   10       if max_args ~= nil then
+****0         if type(max_args) ~= "number" then
+****0           error("max_args must be a number", 2)
+
+****0         elseif max_args < MIN_POST_ARGS then
+****0           error("max_args must be >= " .. MIN_POST_ARGS, 2)
+
+****0         elseif max_args > MAX_POST_ARGS then
+****0           error("max_args must be <= " .. MAX_POST_ARGS, 2)
+              end
+            end
+
+            -- TODO: should we also compare content_length to client_body_buffer_size here?
+
+   10       ngx.req.read_body()
+    6       local pargs, err = ngx.req.get_post_args(max_args or MAX_POST_ARGS_DEFAULT)
+    6       if not pargs then
+****0         return nil, err, CONTENT_TYPE_POST
+            end
+
+    6       return pargs, nil, CONTENT_TYPE_POST
+
+   10     elseif find(content_type_lower, CONTENT_TYPE_JSON, 1, true) == 1 then
+   10       local body, err = _REQUEST.get_raw_body()
+    6       if not body then
+****0         return nil, err, CONTENT_TYPE_JSON
+            end
+
+    6       cjson.decode_array_with_array_mt(true)
+    6       local json = cjson.decode(body)
+    6       cjson.decode_array_with_array_mt(false)
+    6       if not json then
+    6         return nil, "invalid json body", CONTENT_TYPE_JSON
+            end
+
+****0       return json, nil, CONTENT_TYPE_JSON
+
+****0     elseif find(content_type_lower, CONTENT_TYPE_FORM_DATA, 1, true) == 1 then
+****0       local body, err = _REQUEST.get_raw_body()
+****0       if not body then
+****0         return nil, err, CONTENT_TYPE_FORM_DATA
+            end
+
+            -- TODO: multipart library doesn't support multiple fields with same name
+****0       return multipart(body, content_type):get_all(), nil, CONTENT_TYPE_FORM_DATA
+
+          else
+****0       return nil, "unsupported content type '" .. content_type .. "'", content_type_lower
+          end
+        end
+
+
+   73   return _REQUEST
+      end
+
+
+   19 return {
+   19   new = new,
+   19 }
+
+==============================================================================
+./kong/pdk/response.lua
+==============================================================================
+      ---
+      -- Client response module
+      --
+      -- The downstream response module contains a set of functions for producing and
+      -- manipulating responses sent back to the client ("downstream"). Responses can
+      -- be produced by Kong (e.g. an authentication plugin rejecting a request), or
+      -- proxied back from an Service's response body.
+      --
+      -- Unlike `kong.service.response`, this module allows mutating the response
+      -- before sending it back to the client.
+      --
+      -- @module kong.response
+
+
+   19 local cjson = require "cjson.safe"
+   19 local meta = require "kong.meta"
+   19 local checks = require "kong.pdk.private.checks"
+   19 local phase_checker = require "kong.pdk.private.phases"
+
+
+   19 local ngx = ngx
+   19 local fmt = string.format
+   19 local type = type
+   19 local error = error
+   19 local pairs = pairs
+   19 local insert = table.insert
+   19 local coroutine = coroutine
+   19 local normalize_header = checks.normalize_header
+   19 local normalize_multi_header = checks.normalize_multi_header
+   19 local validate_header = checks.validate_header
+   19 local validate_headers = checks.validate_headers
+   19 local check_phase = phase_checker.check
+
+
+   19 local PHASES = phase_checker.phases
+
+
+   38 local header_body_log = phase_checker.new(PHASES.header_filter,
+   19                                           PHASES.body_filter,
+   19                                           PHASES.log,
+   19                                           PHASES.admin_api)
+
+   38 local rewrite_access = phase_checker.new(PHASES.rewrite,
+   19                                          PHASES.access,
+   19                                          PHASES.admin_api)
+
+   38 local rewrite_access_header = phase_checker.new(PHASES.rewrite,
+   19                                                 PHASES.access,
+   19                                                 PHASES.header_filter,
+   19                                                 PHASES.admin_api)
+
+
+      local function new(self, major_version)
+   73   local _RESPONSE = {}
+
+   73   local MIN_HEADERS          = 1
+   73   local MAX_HEADERS_DEFAULT  = 100
+   73   local MAX_HEADERS          = 1000
+
+   73   local MIN_STATUS_CODE      = 100
+   73   local MAX_STATUS_CODE      = 599
+
+   73   local SERVER_HEADER_NAME   = "Server"
+   73   local SERVER_HEADER_VALUE  = meta._NAME .. "/" .. meta._VERSION
+
+   73   local CONTENT_LENGTH_NAME  = "Content-Length"
+   73   local CONTENT_TYPE_NAME    = "Content-Type"
+   73   local CONTENT_TYPE_JSON    = "application/json; charset=utf-8"
+
+
+        ---
+        -- Returns the HTTP status code currently set for the downstream response (as
+        -- a Lua number).
+        --
+        -- If the request was proxied (as per `kong.response.get_source()`), the
+        -- return value will be that of the response from the Service (identical to
+        -- `kong.service.response.get_status()`).
+        --
+        -- If the request was _not_ proxied, and the response was produced by Kong
+        -- itself (i.e. via `kong.response.exit()`), the return value will be
+        -- returned as-is.
+        --
+        -- @function kong.response.get_status
+        -- @phases header_filter, body_filter, log, admin_api
+        -- @treturn number status The HTTP status code currently set for the
+        -- downstream response
+        -- @usage
+        -- kong.response.get_status() -- 200
+   73   function _RESPONSE.get_status()
+   12     check_phase(header_body_log)
+
+   19     return ngx.status
+        end
+
+
+        ---
+        -- Returns the value of the specified response header, as would be seen by
+        -- the client once received.
+        --
+        -- The list of headers returned by this function can consist of both response
+        -- headers from the proxied Service _and_ headers added by Kong (e.g. via
+        -- `kong.response.add_header()`).
+        --
+        -- The return value is either a `string`, or can be `nil` if a header with
+        -- `name` was not found in the response. If a header with the same name is
+        -- present multiple times in the request, this function will return the value
+        -- of the first occurrence of this header.
+        --
+        -- @function kong.response.get_header
+        -- @phases header_filter, body_filter, log, admin_api
+        -- @tparam string name The name of the header
+        --
+        -- Header names are case-insensitive and dashes (`-`) can be written as
+        -- underscores (`_`); that is, the header `X-Custom-Header` can also be
+        -- retrieved as `x_custom_header`.
+        --
+        -- @treturn string|nil The value of the header
+        -- @usage
+        -- -- Given a response with the following headers:
+        -- -- X-Custom-Header: bla
+        -- -- X-Another: foo bar
+        -- -- X-Another: baz
+        --
+        -- kong.response.get_header("x-custom-header") -- "bla"
+        -- kong.response.get_header("X-Another")       -- "foo bar"
+        -- kong.response.get_header("X-None")          -- nil
+   73   function _RESPONSE.get_header(name)
+   12     check_phase(header_body_log)
+
+   10     if type(name) ~= "string" then
+****0       error("header name must be a string", 2)
+          end
+
+   19     local header_value = _RESPONSE.get_headers()[name]
+    9     if type(header_value) == "table" then
+****0       return header_value[1]
+          end
+
+    9     return header_value
+        end
+
+
+        ---
+        -- Returns a Lua table holding the response headers. Keys are header names.
+        -- Values are either a string with the header value, or an array of strings
+        -- if a header was sent multiple times. Header names in this table are
+        -- case-insensitive and are normalized to lowercase, and dashes (`-`) can be
+        -- written as underscores (`_`); that is, the header `X-Custom-Header` can
+        -- also be retrieved as `x_custom_header`.
+        --
+        -- A response initially has no headers until a plugin short-circuits the
+        -- proxying by producing one (e.g. an authentication plugin rejecting a
+        -- request), or the request has been proxied, and one of the latter execution
+        -- phases is currently running.
+        --
+        -- Unlike `kong.service.response.get_headers()`, this function returns *all*
+        -- headers as the client would see them upon reception, including headers
+        -- added by Kong itself.
+        --
+        -- By default, this function returns up to **100** headers. The optional
+        -- `max_headers` argument can be specified to customize this limit, but must
+        -- be greater than **1** and not greater than **1000**.
+        --
+        -- @function kong.response.get_headers
+        -- @phases header_filter, body_filter, log, admin_api
+        -- @tparam[opt] number max_headers Limits how many headers are parsed
+        -- @treturn table headers A table representation of the headers in the
+        -- response
+        --
+        -- @treturn string err If more headers than `max_headers` were present, a
+        -- string with the error `"truncated"`.
+        -- @usage
+        -- -- Given an response from the Service with the following headers:
+        -- -- X-Custom-Header: bla
+        -- -- X-Another: foo bar
+        -- -- X-Another: baz
+        --
+        -- local headers = kong.response.get_headers()
+        --
+        -- headers.x_custom_header -- "bla"
+        -- headers.x_another[1]    -- "foo bar"
+        -- headers["X-Another"][2] -- "baz"
+   73   function _RESPONSE.get_headers(max_headers)
+   38     check_phase(header_body_log)
+
+   33     if max_headers == nil then
+   23       return ngx.resp.get_headers(MAX_HEADERS_DEFAULT)
+          end
+
+   10     if type(max_headers) ~= "number" then
+****0       error("max_headers must be a number", 2)
+
+   10     elseif max_headers < MIN_HEADERS then
+****0       error("max_headers must be >= " .. MIN_HEADERS, 2)
+
+   10     elseif max_headers > MAX_HEADERS then
+****0       error("max_headers must be <= " .. MAX_HEADERS, 2)
+          end
+
+   10     return ngx.resp.get_headers(max_headers)
+        end
+
+
+        ---
+        -- This function helps determining where the current response originated
+        -- from.  Kong being a reverse proxy, it can short-circuit a request and
+        -- produce a response of its own, or the response can come from the proxied
+        -- Service.
+        --
+        -- Returns a string with three possible values:
+        --
+        -- * "exit" is returned when, at some point during the processing of the
+        --   request, there has been a call to `kong.response.exit()`. In other
+        --   words, when the request was short-circuited by a plugin or by Kong
+        --   itself (e.g.  invalid credentials)
+        -- * "error" is returned when an error has happened while processing the
+        --   request - for example, a timeout while connecting to the upstream
+        --   service.
+        -- * "service" is returned when the response was originated by successfully
+        --   contacting the proxied Service.
+        --
+        -- @function kong.response.get_source
+        -- @phases header_filter, body_filter, log, admin_api
+        -- @treturn string the source.
+        -- @usage
+        -- if kong.response.get_source() == "service" then
+        --   kong.log("The response comes from the Service")
+        -- elseif kong.response.get_source() == "error" then
+        --   kong.log("There was an error while processing the request")
+        -- elseif kong.response.get_source() == "exit" then
+        --   kong.log("There was an early exit while processing the request")
+        -- end
+   73   function _RESPONSE.get_source()
+   10     check_phase(header_body_log)
+
+    9     local ctx = ngx.ctx
+
+    9     if ctx.KONG_UNEXPECTED then
+****0       return "error"
+          end
+
+    9     if ctx.KONG_PROXIED then
+****0       return "service"
+          end
+
+    9     if ctx.KONG_EXITED then
+    8       return "exit"
+          end
+
+    1     return "error"
+        end
+
+
+        ---
+        -- Allows changing the downstream response HTTP status code before sending it
+        -- to the client.
+        --
+        -- This function should be used in the `header_filter` phase, as Kong is
+        -- preparing headers to be sent back to the client.
+        --
+        -- @function kong.response.set_status
+        -- @phases rewrite, access, header_filter, admin_api
+        -- @tparam number status The new status
+        -- @return Nothing; throws an error on invalid input.
+        -- @usage
+        -- kong.response.set_status(404)
+   73   function _RESPONSE.set_status(status)
+   12     check_phase(rewrite_access_header)
+
+   15     if ngx.headers_sent then
+    3       error("headers have already been sent", 2)
+          end
+
+    4     if type(status) ~= "number" then
+****0       error("code must be a number", 2)
+
+    4     elseif status < MIN_STATUS_CODE or status > MAX_STATUS_CODE then
+****0       error(fmt("code must be a number between %u and %u", MIN_STATUS_CODE, MAX_STATUS_CODE), 2)
+          end
+
+    8     if ngx.headers_sent then
+****0       error("headers have already been sent", 2)
+          end
+
+    4     ngx.status = status
+        end
+
+
+        ---
+        -- Sets a response header with the given value. This function overrides any
+        -- existing header with the same name.
+        --
+        -- This function should be used in the `header_filter` phase, as Kong is
+        -- preparing headers to be sent back to the client.
+        -- @function kong.response.set_header
+        -- @phases rewrite, access, header_filter, admin_api
+        -- @tparam string name The name of the header
+        -- @tparam string|number|boolean value The new value for the header
+        -- @return Nothing; throws an error on invalid input.
+        -- @usage
+        -- kong.response.set_header("X-Foo", "value")
+   73   function _RESPONSE.set_header(name, value)
+   12     check_phase(rewrite_access_header)
+
+   15     if ngx.headers_sent then
+    3       error("headers have already been sent", 2)
+          end
+
+    4     validate_header(name, value)
+
+    8     ngx.header[name] = normalize_header(value)
+        end
+
+
+        ---
+        -- Adds a response header with the given value. Unlike
+        -- `kong.response.set_header()`, this function does not remove any existing
+        -- header with the same name. Instead, another header with the same name will
+        -- be added to the response. If no header with this name already exists on
+        -- the response, then it is added with the given value, similarly to
+        -- `kong.response.set_header().`
+        --
+        -- This function should be used in the `header_filter` phase, as Kong is
+        -- preparing headers to be sent back to the client.
+        -- @function kong.response.add_header
+        -- @phases rewrite, access, header_filter, admin_api
+        -- @tparam string name The header name
+        -- @tparam string|number|boolean value The header value
+        -- @return Nothing; throws an error on invalid input.
+        -- @usage
+        -- kong.response.add_header("Cache-Control", "no-cache")
+        -- kong.response.add_header("Cache-Control", "no-store")
+   73   function _RESPONSE.add_header(name, value)
+   12     check_phase(rewrite_access_header)
+
+   15     if ngx.headers_sent then
+    3       error("headers have already been sent", 2)
+          end
+
+    4     validate_header(name, value)
+
+    7     local new_value = _RESPONSE.get_headers()[name]
+    3     if type(new_value) ~= "table" then
+    2       new_value = { new_value }
+          end
+
+    6     insert(new_value, normalize_header(value))
+
+    3     ngx.header[name] = new_value
+        end
+
+
+        ---
+        -- Removes all occurrences of the specified header in the response sent to
+        -- the client.
+        --
+        -- This function should be used in the `header_filter` phase, as Kong is
+        -- preparing headers to be sent back to the client.
+        --
+        -- @function kong.response.clear_header
+        -- @phases rewrite, access, header_filter, admin_api
+        -- @tparam string name The name of the header to be cleared
+        -- @return Nothing; throws an error on invalid input.
+        -- @usage
+        -- kong.response.set_header("X-Foo", "foo")
+        -- kong.response.add_header("X-Foo", "bar")
+        --
+        -- kong.response.clear_header("X-Foo")
+        -- -- from here onwards, no X-Foo headers will exist in the response
+   73   function _RESPONSE.clear_header(name)
+   12     check_phase(rewrite_access_header)
+
+   15     if ngx.headers_sent then
+    3       error("headers have already been sent", 2)
+          end
+
+    4     if type(name) ~= "string" then
+****0       error("header name must be a string", 2)
+          end
+
+    4     ngx.header[name] = nil
+        end
+
+
+        ---
+        -- Sets the headers for the response. Unlike `kong.response.set_header()`,
+        -- the `headers` argument must be a table in which each key is a string
+        -- (corresponding to a header's name), and each value is a string, or an
+        -- array of strings.
+        --
+        -- This function should be used in the `header_filter` phase, as Kong is
+        -- preparing headers to be sent back to the client.
+        --
+        -- The resulting headers are produced in lexicographical order. The order of
+        -- entries with the same name (when values are given as an array) is
+        -- retained.
+        --
+        -- This function overrides any existing header bearing the same name as those
+        -- specified in the `headers` argument. Other headers remain unchanged.
+        --
+        -- @function kong.response.set_headers
+        -- @phases rewrite, access, header_filter, admin_api
+        -- @tparam table headers
+        -- @return Nothing; throws an error on invalid input.
+        -- @usage
+        -- kong.response.set_headers({
+        --   ["Bla"] = "boo",
+        --   ["X-Foo"] = "foo3",
+        --   ["Cache-Control"] = { "no-store", "no-cache" }
+        -- })
+        --
+        -- -- Will add the following headers to the response, in this order:
+        -- -- X-Bar: bar1
+        -- -- Bla: boo
+        -- -- Cache-Control: no-store
+        -- -- Cache-Control: no-cache
+        -- -- X-Foo: foo3
+   73   function _RESPONSE.set_headers(headers)
+   12     check_phase(rewrite_access_header)
+
+   15     if ngx.headers_sent then
+    3       error("headers have already been sent", 2)
+          end
+
+    4     validate_headers(headers)
+
+    8     for name, value in pairs(headers) do
+    8       ngx.header[name] = normalize_multi_header(value)
+          end
+        end
+
+
+        --function _RESPONSE.set_raw_body(body)
+        --  -- TODO: implement, but how?
+        --end
+        --
+        --
+        --function _RESPONSE.set_body(args, mimetype)
+        --  -- TODO: implement, but how?
+        --end
+
+
+        local function send(status, body, headers)
+   32     if ngx.headers_sent then
+****0       error("headers have already been sent", 2)
+          end
+
+          local json
+   16     if type(body) == "table" then
+            local err
+    4       json, err = cjson.encode(body)
+    4       if err then
+****0         return nil, err
+            end
+          end
+
+   16     ngx.status = status
+
+   32     if self.ctx.core.phase == phase_checker.phases.admin_api then
+****0       ngx.header[SERVER_HEADER_NAME] = SERVER_HEADER_VALUE
+          end
+
+   16     if headers ~= nil then
+    6       for name, value in pairs(headers) do
+    6         ngx.header[name] = normalize_multi_header(value)
+            end
+          end
+
+   16     if json ~= nil then
+    4       ngx.header[CONTENT_TYPE_NAME]   = CONTENT_TYPE_JSON
+    4       ngx.header[CONTENT_LENGTH_NAME] = #json
+    4       ngx.print(json)
+
+   12     elseif body ~= nil then
+    5       ngx.header[CONTENT_LENGTH_NAME] = #body
+    5       ngx.print(body)
+
+          else
+    7       ngx.header[CONTENT_LENGTH_NAME] = 0
+          end
+
+   14     return ngx.exit(status)
+        end
+
+
+        local function flush(ctx)
+****0     ctx = ctx or ngx.ctx
+****0     local response = ctx.delayed_response
+****0     return send(response.status_code, response.content, response.headers)
+        end
+
+
+        ---
+        -- This function interrupts the current processing and produces a response.
+        -- It is typical to see plugins using it to produce a response before Kong
+        -- has a chance to proxy the request (e.g. an authentication plugin rejecting
+        -- a request, or a caching plugin serving a cached response).
+        --
+        -- It is recommended to use this function in conjunction with the `return`
+        -- operator, to better reflect its meaning:
+        --
+        -- ```lua
+        -- return kong.response.exit(200, "Success")
+        -- ```
+        --
+        -- Calling `kong.response.exit()` will interrupt the execution flow of
+        -- plugins in the current phase. Subsequent phases will still be invoked.
+        -- E.g. if a plugin called `kong.response.exit()` in the `access` phase, no
+        -- other plugin will be executed in that phase, but the `header_filter`,
+        -- `body_filter`, and `log` phases will still be executed, along with their
+        -- plugins. Plugins should thus be programmed defensively against cases when
+        -- a request was **not** proxied to the Service, but instead was produced by
+        -- Kong itself.
+        --
+        -- The first argument `status` will set the status code of the response that
+        -- will be seen by the client.
+        --
+        -- The second, optional, `body` argument will set the response body. If it is
+        -- a string, no special processing will be done, and the body will be sent
+        -- as-is.  It is the caller's responsibility to set the appropriate
+        -- Content-Type header via the third argument.  As a convenience, `body` can
+        -- be specified as a table; in which case, it will be JSON-encoded and the
+        -- `application/json` Content-Type header will be set.
+        --
+        -- The third, optional, `headers` argument can be a table specifying response
+        -- headers to send. If specified, its behavior is similar to
+        -- `kong.response.set_headers()`.
+        --
+        -- Unless manually specified, this method will automatically set the
+        -- Content-Length header in the produced response for convenience.
+        -- @function kong.response.exit
+        -- @phases rewrite, access, admin_api, header_filter (only if `body` is nil)
+        -- @tparam number status The status to be used
+        -- @tparam[opt] table|string body The body to be used
+        -- @tparam[opt] table headers The headers to be used
+        -- @return Nothing; throws an error on invalid input.
+        -- @usage
+        -- return kong.response.exit(403, "Access Forbidden", {
+        --   ["Content-Type"] = "text/plain",
+        --   ["WWW-Authenticate"] = "Basic"
+        -- })
+        --
+        -- ---
+        --
+        -- return kong.response.exit(403, [[{"message":"Access Forbidden"}]], {
+        --   ["Content-Type"] = "application/json",
+        --   ["WWW-Authenticate"] = "Basic"
+        -- })
+        --
+        -- ---
+        --
+        -- return kong.response.exit(403, { message = "Access Forbidden" }, {
+        --   ["WWW-Authenticate"] = "Basic"
+        -- })
+   73   function _RESPONSE.exit(status, body, headers)
+   38     if body == nil then
+   23       check_phase(rewrite_access_header)
+          else
+   25       check_phase(rewrite_access)
+          end
+
+   49     if ngx.headers_sent then
+    7       error("headers have already been sent", 2)
+          end
+
+   16     if type(status) ~= "number" then
+****0       error("code must be a number", 2)
+
+   16     elseif status < MIN_STATUS_CODE or status > MAX_STATUS_CODE then
+****0       error(fmt("code must be a number between %u and %u", MIN_STATUS_CODE, MAX_STATUS_CODE), 2)
+          end
+
+   16     if body ~= nil and type(body) ~= "string" and type(body) ~= "table" then
+****0       error("body must be a nil, string or table", 2)
+          end
+
+   16     if headers ~= nil and type(headers) ~= "table" then
+****0       error("headers must be a nil or table", 2)
+          end
+
+   16     if headers ~= nil then
+    3       validate_headers(headers)
+          end
+
+   16     local ctx = ngx.ctx
+   16     ctx.KONG_EXITED = true
+   16     if ctx.delay_response and not ctx.delayed_response then
+****0       ctx.delayed_response = {
+              status_code = status,
+              content     = body,
+              headers     = headers,
+            }
+
+****0       ctx.delayed_response_callback = flush
+****0       coroutine.yield()
+
+          else
+   16       return send(status, body, headers)
+          end
+        end
+
+
+   73   return _RESPONSE
+      end
+
+
+   19 return {
+   19   new = new,
+   19 }
+
+==============================================================================
+./kong/pdk/router.lua
+==============================================================================
+      --- Router module
+      -- A set of functions to access the routing properties of the request.
+      --
+      -- @module kong.router
+
+
+   19 local phase_checker = require "kong.pdk.private.phases"
+
+
+   19 local ngx = ngx
+   19 local check_phase = phase_checker.check
+
+
+   19 local PHASES = phase_checker.phases
+   38 local ROUTER_PHASES = phase_checker.new(PHASES.access,
+   19                                         PHASES.header_filter,
+   19                                         PHASES.body_filter,
+   19                                         PHASES.log)
+
+      local function new(self)
+   73   local _ROUTER = {}
+
+
+        ---
+        -- Returns the current `route` entity. The request was matched against this
+        -- route.
+        --
+        -- @function kong.router.get_route
+        -- @phases access, header_filter, body_filter, log
+        -- @treturn table the `route` entity.
+        -- @usage
+        -- if kong.router.get_route() then
+        --   -- routed by route & service entities
+        -- else
+        --   -- routed by a legacy API entity
+        -- end
+   73   function _ROUTER.get_route()
+   14     check_phase(ROUTER_PHASES)
+
+   22     return ngx.ctx.route
+        end
+
+
+        ---
+        -- Returns the current `service` entity. The request will be targetted to this
+        -- upstream service.
+        --
+        -- @function kong.router.get_service
+        -- @phases access, header_filter, body_filter, log
+        -- @treturn table the `service` entity.
+        -- @usage
+        -- if kong.router.get_service() then
+        --   -- routed by route & service entities
+        -- else
+        --   -- routed by a legacy API entity
+        -- end
+   73   function _ROUTER.get_service()
+   14     check_phase(ROUTER_PHASES)
+
+   22     return ngx.ctx.service
+        end
+
+
+   73   return _ROUTER
+      end
+
+
+   19 return {
+   19   new = new,
+   19 }
+
+==============================================================================
+./kong/pdk/service.lua
+==============================================================================
+      ---
+      -- The service module contains a set of functions to manipulate the connection
+      -- aspect of the request to the Service, such as connecting to a given host, IP
+      -- address/port, or choosing a given Upstream entity for load-balancing and
+      -- healthchecking.
+      --
+      -- @module kong.service
+
+
+   19 local balancer = require "kong.runloop.balancer"
+   19 local phase_checker = require "kong.pdk.private.phases"
+
+
+   19 local ngx = ngx
+   19 local check_phase = phase_checker.check
+
+
+   19 local PHASES = phase_checker.phases
+
+
+      local function new()
+   73   local service = {}
+
+
+        ---
+        -- Sets the desired Upstream entity to handle the load-balancing step for
+        -- this request. Using this method is equivalent to creating a Service with a
+        -- `host` property equal to that of an Upstream entity (in which case, the
+        -- request would be proxied to one of the Targets associated with that
+        -- Upstream).
+        --
+        -- The `host` argument should receive a string equal to that of one of the
+        -- Upstream entities currently configured.
+        --
+        -- @function kong.service.set_upstream
+        -- @phases access
+        -- @tparam string host
+        -- @treturn boolean|nil `true` on success, or `nil` if no upstream entities
+        -- where found
+        -- @treturn string|nil An error message describing the error if there was
+        -- one.
+        --
+        -- @usage
+        -- local ok, err = kong.service.set_upstream("service.prod")
+        -- if not ok then
+        --   kong.log.err(err)
+        --   return
+        -- end
+   73   function service.set_upstream(host)
+   14     check_phase(PHASES.access)
+
+    8     if type(host) ~= "string" then
+****0       error("host must be a string", 2)
+          end
+
+    8     local upstream = balancer.get_upstream_by_name(host)
+    8     if not upstream then
+****0       return nil, "could not find an Upstream named '" .. host .. "'"
+          end
+
+   16     ngx.ctx.balancer_data.host = host
+    8     return true
+        end
+
+
+        ---
+        -- Sets the host and port on which to connect to for proxying the request. ]]
+        -- Using this method is equivalent to ask Kong to not run the load-balancing
+        -- phase for this request, and consider it manually overridden.
+        -- Load-balancing components such as retries and health-checks will also be
+        -- ignored for this request.
+        --
+        -- The `host` argument expects a string containing the IP address of the
+        -- upstream server (IPv4/IPv6), and the `port` argument must contain a number
+        -- representing the port on which to connect to.
+        --
+        -- @function kong.service.set_target
+        -- @phases access
+        -- @tparam string host
+        -- @tparam number port
+        -- @usage
+        -- kong.service.set_target("service.local", 443)
+        -- kong.service.set_target("192.168.130.1", 80)
+   73   function service.set_target(host, port)
+   14     check_phase(PHASES.access)
+
+    8     if type(host) ~= "string" then
+****0       error("host must be a string", 2)
+          end
+    8     if type(port) ~= "number" or math.floor(port) ~= port then
+****0       error("port must be an integer", 2)
+          end
+    8     if port < 0 or port > 65535 then
+****0       error("port must be an integer between 0 and 65535: given " .. port, 2)
+          end
+
+    8     ngx.var.upstream_host = host
+   14     ngx.ctx.balancer_data.host = host
+   14     ngx.ctx.balancer_data.port = port
+        end
+
+
+   73   return service
+      end
+
+
+   19 return {
+   19   new = new,
+   19 }
+
+==============================================================================
+./kong/pdk/table.lua
+==============================================================================
+      --- Utilities for Lua tables
+      --
+      -- @module kong.table
+
+
+      local new_tab
+      local clear_tab
+      do
+        ---
+        -- Returns a table with pre-allocated number of slots in its array and hash
+        -- parts.
+        --
+        -- @function kong.table.new
+        -- @tparam[opt] number narr specifies the number of slots to pre-allocate
+        -- in the array part.
+        -- @tparam[opt] number nrec specifies the number of slots to pre-allocate in
+        -- the hash part.
+        -- @treturn table the newly created table
+        -- @usage
+        -- local tab = kong.table.new(4, 4)
+        local ok
+   38   ok, new_tab = pcall(require, "table.new")
+   19   if not ok then
+****0     new_tab = function (narr, nrec) return {} end
+        end
+
+
+        ---
+        -- Clears a table from all of its array and hash parts entries.
+        --
+        -- @function kong.table.clear
+        -- @tparam table tab the table which will be cleared
+        -- @return Nothing
+        -- @usage
+        -- local tab = {
+        --   "hello",
+        --   foo = "bar"
+        -- }
+        --
+        -- kong.table.clear(tab)
+        --
+        -- kong.log(tab[1]) -- nil
+        -- kong.log(tab.foo) -- nil
+   38   ok, clear_tab = pcall(require, "table.clear")
+   19   if not ok then
+          clear_tab = function (tab)
+****0       for k, _ in pairs(tab) do
+****0         tab[k] = nil
+            end
+          end
+        end
+      end
+
+
+      --- Merges the contents of two tables together, producing a new one.
+      -- The entries of both tables are copied non-recursively to the new one.
+      -- If both tables have the same key, the second one takes precedence.
+      -- @tparam table t1 The first table
+      -- @tparam table t2 The second table
+      -- @treturn table The (new) merged table
+      -- @usage
+      -- local t1 = {1, 2, 3, foo = "f"}
+      -- local t2 = {4, 5, bar = "b"}
+      -- local t3 = kong.table.merge(t1, t2) -- {4, 5, 3, foo = "f", bar = "b"}
+      local function merge_tab(t1, t2)
+****0   local res = {}
+****0   if t1 then
+****0     for k,v in pairs(t1) do
+****0       res[k] = v
+          end
+        end
+****0   if t2 then
+****0     for k,v in pairs(t2) do
+****0       res[k] = v
+          end
+        end
+****0   return res
+      end
+
+
+      local function new(self)
+   73   return {
+   73     new = new_tab,
+   73     clear = clear_tab,
+   73     merge = merge_tab,
+   73   }
+      end
+
+
+   19 return {
+   19   new = new,
+   19 }
+
+==============================================================================
+Summary
+==============================================================================
+
+File                    Hits Missed Coverage
+--------------------------------------------
+./kong/pdk/client.lua   42   3      93.33%
+./kong/pdk/ctx.lua      20   3      86.96%
+./kong/pdk/init.lua     31   7      81.58%
+./kong/pdk/ip.lua       12   11     52.17%
+./kong/pdk/log.lua      89   55     61.81%
+./kong/pdk/node.lua     17   3      85.00%
+./kong/pdk/request.lua  131  52     71.58%
+./kong/pdk/response.lua 139  24     85.28%
+./kong/pdk/router.lua   19   0      100.00%
+./kong/pdk/service.lua  25   5      83.33%
+./kong/pdk/table.lua    12   11     52.17%
+--------------------------------------------
+Total                   537  174    75.53%
